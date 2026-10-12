@@ -43,7 +43,15 @@ st.markdown(
     section[data-testid="stSidebar"] h2,
     section[data-testid="stSidebar"] h3 {
         font-weight: 600;
-        color: #1D2B33;
+        color: #1D2B33 !important;
+    }
+    
+    /* Memaksa teks di sidebar menjadi gelap agar terlihat di background terang */
+    section[data-testid="stSidebar"] p, 
+    section[data-testid="stSidebar"] span, 
+    section[data-testid="stSidebar"] label,
+    section[data-testid="stSidebar"] .stWidgetLabel p {
+        color: #1D2B33 !important;
     }
 
     .judul-halaman {
@@ -82,13 +90,15 @@ def set_semua(nilai: bool):
 with st.sidebar:
     st.subheader("Tampilan peta")
 
+    # Slider diubah ke skala 0 - 100 persen
     opacity_level = st.slider(
         "Transparansi hasil klasifikasi",
-        min_value=0.0,
-        max_value=1.0,
-        value=0.6,
-        step=0.1,
-        help="Geser ke kiri untuk melihat citra satelit, ke kanan untuk melihat hasil model.",
+        min_value=0,
+        max_value=100,
+        value=60,
+        step=5,
+        format="%d%%",
+        help="Geser ke kiri (0%) untuk melihat citra satelit murni, ke kanan (100%) untuk tebakan model pekat.",
     )
 
     st.divider()
@@ -121,10 +131,12 @@ def muat_poligon(path):
     return gpd.read_file(path)
 
 
-def buat_rgba(data, aktif, opacity):
+def buat_rgba(data, aktif, opacity_persen):
     """Warna kelas dan alpha digabung langsung di piksel,
     jadi slider transparansi pasti terlihat pada warna kelas."""
-    alpha = int(round(opacity * 255))
+    # Konversi dari persentase (0-100) ke skala desimal (0-1) lalu ke alpha 8-bit (0-255)
+    alpha = int(round((opacity_persen / 100.0) * 255))
+    
     lut = np.zeros((256, 4), dtype=np.uint8)   # indeks 0 = transparan
     for id_kelas, _, (r, g, b) in KELAS:
         if id_kelas in aktif:
@@ -179,7 +191,7 @@ try:
         image=rgba,
         bounds=[[bawah, kiri], [atas, kanan]],
         name="Layer 2: Hasil Klasifikasi Model",
-        opacity=1.0,   # transparansi sudah ada di kanal alpha piksel
+        opacity=1.0,   # transparansi sudah ada di kanal alpha piksel dari buat_rgba
         show=True,
     ).add_to(m)
 except Exception as e:
