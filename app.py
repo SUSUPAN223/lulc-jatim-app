@@ -9,139 +9,249 @@ from branca.element import Template, MacroElement
 st.set_page_config(page_title="Dashboard LULC", layout="wide")
 
 # ==========================================
-# SIDEBAR CONTROLS (FITUR BARU)
+# KONFIGURASI KELAS (satu sumber untuk warna, filter, dan legenda)
+# ==========================================
+# (id piksel, nama, warna RGB)
+KELAS = [
+    (1, "Perairan",       (44, 123, 182)),
+    (2, "Hutan Biasa",    (0, 128, 0)),
+    (3, "Hutan Mangrove", (0, 204, 102)),
+    (4, "Sawah",          (255, 255, 0)),
+    (5, "Bangunan",       (215, 25, 28)),
+]
+
+FILE_TIF = "Hasil_Klasifikasi_LULC.tif"
+FILE_GEOJSON = "UTS_data.geojson"
+
+# ==========================================
+# TAMPILAN (CSS)
+# ==========================================
+st.markdown(
+    """
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&display=swap');
+
+    html, body, [class*="css"], .stMarkdown, label, button {
+        font-family: 'Instrument Sans', sans-serif;
+    }
+    .block-container { padding-top: 2rem; padding-bottom: 1rem; }
+
+    section[data-testid="stSidebar"] {
+        background-color: #E9EEF0;
+        border-right: 1px solid #CBD5D9;
+    }
+    section[data-testid="stSidebar"] h2,
+    section[data-testid="stSidebar"] h3 {
+        font-weight: 600;
+        color: #1D2B33;
+    }
+
+    .judul-halaman {
+        font-size: 1.75rem;
+        font-weight: 600;
+        color: #1D2B33;
+        line-height: 1.2;
+        margin: 0 0 0.25rem 0;
+    }
+    .sub-halaman {
+        color: #55656D;
+        font-size: 0.95rem;
+        margin: 0 0 1rem 0;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# ==========================================
+# STATE
+# ==========================================
+for _id, nama, _ in KELAS:
+    st.session_state.setdefault(f"kelas_{_id}", True)   # default: semua tampil
+st.session_state.setdefault("view", {"center": [-7.6, 112.5], "zoom": 8})
+
+
+def set_semua(nilai: bool):
+    for _id, _, _ in KELAS:
+        st.session_state[f"kelas_{_id}"] = nilai
+
+
+# ==========================================
+# SIDEBAR
 # ==========================================
 with st.sidebar:
-    st.header("⚙️ Kontrol Peta")
-    
-    # 1. Slider Transparansi
+    st.subheader("Tampilan peta")
+
     opacity_level = st.slider(
-        "Tingkat Transparansi Model (Opacity):", 
-        min_value=0.0, 
-        max_value=1.0, 
-        value=0.6, 
+        "Transparansi hasil klasifikasi",
+        min_value=0.0,
+        max_value=1.0,
+        value=0.6,
         step=0.1,
-        help="Geser ke kiri untuk melihat satelit asli, geser ke kanan untuk melihat tebakan model."
+        help="Geser ke kiri untuk melihat citra satelit, ke kanan untuk melihat hasil model.",
     )
-    
-    st.markdown("---")
-    
-    # 2. Filter Kelas (Multiselect OR)
-    st.subheader("Filter Kelas Tutupan Lahan")
-    daftar_kelas = {
-        'Perairan': 1,
-        'Hutan Biasa': 2,
-        'Hutan Mangrove': 3,
-        'Sawah': 4,
-        'Bangunan': 5
-    }
-    
-    # Secara default, semua kelas terpilih
-    kelas_terpilih = st.multiselect(
-        "Pilih kelas yang ingin ditampilkan:",
-        options=list(daftar_kelas.keys()),
-        default=list(daftar_kelas.keys())
-    )
-    
-    # Mengambil ID angka dari kelas yang dipilih
-    id_kelas_aktif = [daftar_kelas[k] for k in kelas_terpilih]
+
+    st.divider()
+    st.subheader("Kelas tutupan lahan")
+
+    kol_a, kol_b = st.columns(2)
+    kol_a.button("Pilih semua", on_click=set_semua, args=(True,), use_container_width=True)
+    kol_b.button("Kosongkan", on_click=set_semua, args=(False,), use_container_width=True)
+
+    # Checkbox per kelas -> logika OR (1, beberapa, atau semua kelas)
+    for id_kelas, nama, _ in KELAS:
+        st.checkbox(nama, key=f"kelas_{id_kelas}")
+
+id_kelas_aktif = [i for i, _, _ in KELAS if st.session_state[f"kelas_{i}"]]
+
+# ==========================================
+# DATA (di-cache supaya tidak dibaca ulang tiap interaksi)
+# ==========================================
+@st.cache_data(show_spinner="Membaca raster...")
+def muat_raster(path):
+    with rasterio.open(path) as src:
+        data = src.read(1)
+        b = src.bounds
+        crs = src.crs.to_string() if src.crs else None
+    return data, (b.bottom, b.left, b.top, b.right), crs
+
+
+@st.cache_data(show_spinner="Membaca poligon...")
+def muat_poligon(path):
+    return gpd.read_file(path)
+
+
+def buat_rgba(data, aktif, opacity):
+    """Warna kelas dan alpha digabung langsung di piksel,
+    jadi slider transparansi pasti terlihat pada warna kelas."""
+    alpha = int(round(opacity * 255))
+    lut = np.zeros((256, 4), dtype=np.uint8)   # indeks 0 = transparan
+    for id_kelas, _, (r, g, b) in KELAS:
+        if id_kelas in aktif:
+            lut[id_kelas] = [r, g, b, alpha]
+
+    idx = np.where(np.isin(data, [k[0] for k in KELAS]), data, 0).astype(np.uint8)
+    return lut[idx]
 
 
 # ==========================================
-# TAMPILAN UTAMA
+# HALAMAN UTAMA
 # ==========================================
-st.title("🗺️ Web GIS Klasifikasi Tutupan Lahan (LULC)")
+st.markdown('<p class="judul-halaman">Klasifikasi Tutupan Lahan (LULC)</p>', unsafe_allow_html=True)
+st.markdown(
+    '<p class="sub-halaman">Hasil klasifikasi model dibandingkan dengan poligon data asli.</p>',
+    unsafe_allow_html=True,
+)
 
-m = folium.Map(location=[-7.6, 112.5], zoom_start=8)
+view = st.session_state["view"]
+m = folium.Map(location=view["center"], zoom_start=view["zoom"])
 
 # 1. LAYER BASEMAP
 folium.TileLayer(
-    tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}',
-    attr='Google',
-    name='Layer 1: Google Hybrid (Satelit & Label)',
+    tiles="https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}",
+    attr="Google",
+    name="Layer 1: Google Hybrid (Satelit & Label)",
     overlay=False,
-    control=True
+    control=True,
 ).add_to(m)
 
 folium.TileLayer(
-    tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
-    attr='Google',
-    name='Layer 1: Google Satellite (Polos)',
+    tiles="https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
+    attr="Google",
+    name="Layer 1: Google Satellite (Polos)",
     overlay=False,
-    control=True
+    control=True,
 ).add_to(m)
 
-# 2. LAYER TIF (TEBAKAN MODEL BERDASARKAN FILTER)
+# 2. LAYER TIF (HASIL KLASIFIKASI MODEL)
 try:
-    with rasterio.open('Hasil_Klasifikasi_LULC.tif') as src:
-        data = src.read(1)
-        bounds = src.bounds
-        
-    rgba = np.zeros((data.shape[0], data.shape[1], 4), dtype=np.uint8)
-    
-    # Logika Filter 'OR': Hanya warnai piksel jika kelasnya ada di dalam id_kelas_aktif
-    if 1 in id_kelas_aktif:
-        rgba[data == 1] = [44, 123, 182, 255]   # Air
-    if 2 in id_kelas_aktif:
-        rgba[data == 2] = [0, 128, 0, 255]      # Hutan Biasa
-    if 3 in id_kelas_aktif:
-        rgba[data == 3] = [0, 204, 102, 255]    # Hutan Mangrove
-    if 4 in id_kelas_aktif:
-        rgba[data == 4] = [255, 255, 0, 255]    # Sawah
-    if 5 in id_kelas_aktif:
-        rgba[data == 5] = [215, 25, 28, 255]    # Bangunan
-    
+    data, (bawah, kiri, atas, kanan), crs = muat_raster(FILE_TIF)
+
+    if crs and crs.upper() != "EPSG:4326":
+        st.warning(
+            f"Raster memakai {crs}, bukan EPSG:4326. Posisi overlay bisa meleset; "
+            "reproyeksi dulu ke EPSG:4326."
+        )
+
+    rgba = buat_rgba(data, id_kelas_aktif, opacity_level)
+
     folium.raster_layers.ImageOverlay(
         image=rgba,
-        bounds=[[bounds.bottom, bounds.left], [bounds.top, bounds.right]],
-        name="Layer 2: Tebakan Model TIF",
-        opacity=opacity_level, # Menggunakan nilai dari slider transparansi
-        show=True
+        bounds=[[bawah, kiri], [atas, kanan]],
+        name="Layer 2: Hasil Klasifikasi Model",
+        opacity=1.0,   # transparansi sudah ada di kanal alpha piksel
+        show=True,
     ).add_to(m)
 except Exception as e:
     st.error(f"Gagal memuat raster: {e}")
 
 # 3. LAYER POLYGON (DATA ASLI)
 try:
-    gdf = gpd.read_file("UTS_data.geojson") 
-    
+    gdf = muat_poligon(FILE_GEOJSON)
+
     tooltip_poligon = folium.GeoJsonTooltip(
-        fields=['Class'], 
-        aliases=['🎯 Data Asli (Polygon) : '],
-        style="background-color: white; color: black; font-weight: bold; padding: 10px; border: 2px solid #333; border-radius: 5px; font-size: 13px;"
+        fields=["Class"],
+        aliases=["Data asli (poligon): "],
+        style=(
+            "background-color: white; color: black; font-weight: bold; padding: 10px; "
+            "border: 2px solid #333; border-radius: 5px; font-size: 13px;"
+        ),
     )
-    
+
     folium.GeoJson(
         gdf,
         name="Layer 3: Poligon Data Asli",
-        style_function=lambda x: {'color': '#FFFF00', 'weight': 2.5, 'fillOpacity': 0.1},
-        tooltip=tooltip_poligon
+        style_function=lambda x: {"color": "#FFFF00", "weight": 2.5, "fillOpacity": 0.1},
+        tooltip=tooltip_poligon,
     ).add_to(m)
 except Exception as e:
     st.error(f"Gagal memproses poligon: {e}")
 
 # ==========================================
-# LEGENDA
+# LEGENDA (hanya menampilkan kelas yang aktif)
 # ==========================================
-legenda_html = """
-{% macro html(this, kwargs) %}
-<div style="position: absolute; bottom: 30px; left: 30px; width: 220px; 
-    background-color: white !important; color: #333 !important; z-index:9999; 
-    font-size:13px; font-family: Arial, sans-serif; border: 1px solid #ccc; 
-    border-radius: 8px; padding: 15px; box-shadow: 2px 2px 6px rgba(0,0,0,0.3);">
-    <h4 style="margin-top:0; margin-bottom:10px; font-size:15px; color: black !important;"><b>Legenda LULC</b></h4>
-    <i style="background:rgb(44,123,182); width: 15px; height: 15px; float: left; margin-right: 10px; border-radius: 2px;"></i> Perairan<br><br>
-    <i style="background:rgb(0,204,102); width: 15px; height: 15px; float: left; margin-right: 10px; border-radius: 2px;"></i> Hutan Mangrove<br><br>
-    <i style="background:rgb(0,128,0); width: 15px; height: 15px; float: left; margin-right: 10px; border-radius: 2px;"></i> Hutan Biasa<br><br>
-    <i style="background:rgb(215,25,28); width: 15px; height: 15px; float: left; margin-right: 10px; border-radius: 2px;"></i> Bangunan<br><br>
-    <i style="background:rgb(255,255,0); width: 15px; height: 15px; float: left; margin-right: 10px; border-radius: 2px;"></i> Sawah<br>
-</div>
-{% endmacro %}
-"""
+baris = ""
+for id_kelas, nama, (r, g, b) in KELAS:
+    if id_kelas in id_kelas_aktif:
+        baris += (
+            '<div style="display:flex; align-items:center; margin-bottom:7px;">'
+            f'<span style="background:rgb({r},{g},{b}); width:14px; height:14px; '
+            'border-radius:2px; margin-right:10px; border:1px solid rgba(0,0,0,0.25);"></span>'
+            f"{nama}</div>"
+        )
+if not baris:
+    baris = '<div style="color:#666;">Tidak ada kelas dipilih</div>'
+
+legenda_html = (
+    "{% macro html(this, kwargs) %}"
+    '<div style="position:absolute; bottom:30px; left:30px; min-width:180px; '
+    "background-color:white !important; color:#1D2B33 !important; z-index:9999; "
+    "font-size:13px; font-family:Arial, sans-serif; border:1px solid #B8C4C9; "
+    'border-radius:4px; padding:12px 14px; box-shadow:0 1px 4px rgba(0,0,0,0.25);">'
+    '<div style="font-size:14px; font-weight:bold; margin-bottom:10px;">Legenda LULC</div>'
+    + baris
+    + "</div>{% endmacro %}"
+)
 macro = MacroElement()
 macro._template = Template(legenda_html)
 m.get_root().add_child(macro)
 
 folium.LayerControl(collapsed=False).add_to(m)
 
-st_folium(m, use_container_width=True, height=700)
+# Key berubah saat filter/transparansi berubah, supaya peta pasti digambar ulang
+kunci_peta = f"peta_{opacity_level}_{'-'.join(map(str, id_kelas_aktif))}"
+
+hasil = st_folium(
+    m,
+    use_container_width=True,
+    height=700,
+    key=kunci_peta,
+    returned_objects=["center", "zoom"],
+)
+
+# Simpan posisi & zoom terakhir agar peta tidak lompat saat filter diubah
+if hasil and hasil.get("center") and hasil.get("zoom"):
+    st.session_state["view"] = {
+        "center": [hasil["center"]["lat"], hasil["center"]["lng"]],
+        "zoom": hasil["zoom"],
+    }
