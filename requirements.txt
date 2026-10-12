@@ -2,6 +2,6 @@ streamlit
 folium
 streamlit-folium
 geopandas
-joblib
-pandas
-scikit-learn
+rasterio
+numpy
+branca
