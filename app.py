@@ -90,7 +90,7 @@ def set_semua(nilai: bool):
 with st.sidebar:
     st.subheader("Tampilan peta")
 
-    # Slider diubah ke skala 0 - 100 persen
+    # Slider skala 0 - 100 persen
     opacity_level = st.slider(
         "Transparansi hasil klasifikasi",
         min_value=0,
@@ -250,14 +250,14 @@ m.get_root().add_child(macro)
 
 folium.LayerControl(collapsed=False).add_to(m)
 
-# Key berubah saat filter/transparansi berubah, supaya peta pasti digambar ulang
-kunci_peta = f"peta_{opacity_level}_{'-'.join(map(str, id_kelas_aktif))}"
-
+# ==========================================
+# RENDER PETA DENGAN KUNCI STATIS (Mencegah Tumpukan Redup)
+# ==========================================
 hasil = st_folium(
     m,
     use_container_width=True,
     height=700,
-    key=kunci_peta,
+    key="peta_utama_lulc", # Kunci dibuat statis agar tidak dirender ulang secara bertumpuk
     returned_objects=["center", "zoom"],
 )
 
