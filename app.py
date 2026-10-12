@@ -6,15 +6,20 @@ import rasterio
 import numpy as np
 from branca.element import Template, MacroElement
 
-st.set_page_config(page_title="Dashboard LULC Spasial", layout="wide")
+st.set_page_config(page_title="Dashboard LULC", layout="wide")
 
-st.title("Web GIS Klasifikasi Tutupan Lahan (LULC)")
-st.markdown("Visualisasi spasial hasil pemetaan berbasis piksel menggunakan model Machine Learning Random Forest.")
+st.title("🗺️ Web GIS Klasifikasi Tutupan Lahan (LULC)")
 
-# Inisialisasi peta dasar dengan koordinat wilayah kajian
-m = folium.Map(location=[-7.25, 112.70], zoom_start=11)
+# 1. BASEMAP GOOGLE HYBRID (Lebih terang dan ada label kota)
+m = folium.Map(location=[-7.6, 112.5], zoom_start=8)
+folium.TileLayer(
+    tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}',
+    attr='Google',
+    name='Google Hybrid (Label)',
+    overlay=False,
+    control=True
+).add_to(m)
 
-# Penambahan lapisan basemap Google Satellite
 folium.TileLayer(
     tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
     attr='Google',
@@ -23,64 +28,84 @@ folium.TileLayer(
     control=True
 ).add_to(m)
 
-# Pemrosesan dan pewarnaan data raster TIF
+# 2. MEMUAT RASTER DAN MEMECAHNYA JADI 5 LAYER (Agar bisa dicentang satu-satu)
 try:
     with rasterio.open('Hasil_Klasifikasi_LULC.tif') as src:
         data = src.read(1)
         bounds = src.bounds
         
-    # Inisialisasi kanvas matriks RGBA kosong untuk pewarnaan spasial
-    rgba = np.zeros((data.shape[0], data.shape[1], 4), dtype=np.uint8)
+    valid_pixels = np.sum(data > 0)
     
-    # Pemetaan nilai integer biner raster ke kode warna RGB [Red, Green, Blue, Alpha]
-    rgba[data == 1] = [44, 123, 182, 255]   # Perairan (Biru)
-    rgba[data == 2] = [0, 128, 0, 255]      # Hutan (Hijau Tua)
-    rgba[data == 3] = [0, 204, 102, 255]    # Hutan Mangrove (Hijau Terang)
-    rgba[data == 4] = [255, 255, 0, 255]    # Sawah (Kuning)
-    rgba[data == 5] = [215, 25, 28, 255]    # Bangunan (Merah)
-    rgba[data == 0] = [0, 0, 0, 0]          # NoData / Background (Transparan)
+    # Kamus Kelas: [Nilai, Nama Kelas, Warna RGB]
+    kelas_lulc = {
+        1: ('LULC: Air', [44, 123, 182, 255]),
+        4: ('LULC: Sawah', [255, 255, 0, 255]),
+        5: ('LULC: Pemukiman', [215, 25, 28, 255]),
+        2: ('LULC: Hutan Non-Mangrove', [0, 128, 0, 255]),
+        3: ('LULC: Hutan Mangrove', [0, 204, 102, 255])
+    }
 
-    # Overlay lapisan citra hasil klasifikasi ke atas peta folium
-    folium.raster_layers.ImageOverlay(
-        image=rgba,
-        bounds=[[bounds.bottom, bounds.left], [bounds.top, bounds.right]],
-        opacity=0.7, 
-        name='Hasil Klasifikasi Random Forest'
-    ).add_to(m)
-    
+    persentase_teks = {}
+
+    # Membangun layer satu per satu
+    for val, (nama, warna) in kelas_lulc.items():
+        # Hitung persentase dinamis
+        pct = (np.sum(data == val) / valid_pixels) * 100 if valid_pixels > 0 else 0
+        nama_layer = f"{nama} ({pct:.2f}%)"
+        persentase_teks[val] = f"{pct:.2f}%"
+        
+        # Buat kanvas kosong khusus untuk 1 kelas ini saja
+        rgba = np.zeros((data.shape[0], data.shape[1], 4), dtype=np.uint8)
+        rgba[data == val] = warna
+        
+        folium.raster_layers.ImageOverlay(
+            image=rgba,
+            bounds=[[bounds.bottom, bounds.left], [bounds.top, bounds.right]],
+            name=nama_layer,
+            opacity=0.8,
+            show=True
+        ).add_to(m)
+        
 except Exception as e:
-    st.error(f"Gagal memuat file raster TIF: {e}")
+    st.error(f"Gagal memuat raster: {e}")
 
-# Pemuatan lapisan vektor poligon acuan GeoJSON
+# 3. MEMUAT POLIGON (Berada di atas raster)
 try:
     gdf = gpd.read_file("UTS_data.geojson") 
     folium.GeoJson(
         gdf,
-        name="Poligon Acuan (Ground Truth)",
-        style_function=lambda x: {'color': '#ffffff', 'weight': 1.5, 'fillOpacity': 0.3}
+        name="Poligon Sampel Acuan",
+        style_function=lambda x: {'color': 'white', 'weight': 2, 'fillOpacity': 0.1}
     ).add_to(m)
 except Exception:
     pass
 
-# Komponen HTML legenda interaktif
-legenda_html = """
-{% macro html(this, kwargs) %}
-<div style="position: absolute; bottom: 30px; left: 30px; width: 260px; background-color: white; z-index:9999; font-size:13px; border: 1px solid #d1d5db; border-radius: 6px; padding: 12px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);">
-    <h4 style="margin-top:0; margin-bottom:12px; font-size:14px; font-family: sans-serif; border-bottom: 1px solid #e5e7eb; padding-bottom: 6px;"><b>Legenda LULC</b></h4>
-    <div style="margin-bottom: 8px;"><i style="background:rgb(44,123,182); width: 16px; height: 16px; float: left; margin-right: 10px; border-radius: 2px;"></i> Perairan</div>
-    <div style="margin-bottom: 8px;"><i style="background:rgb(0,128,0); width: 16px; height: 16px; float: left; margin-right: 10px; border-radius: 2px;"></i> Hutan</div>
-    <div style="margin-bottom: 8px;"><i style="background:rgb(0,204,102); width: 16px; height: 16px; float: left; margin-right: 10px; border-radius: 2px;"></i> Hutan Mangrove</div>
-    <div style="margin-bottom: 8px;"><i style="background:rgb(255,255,0); width: 16px; height: 16px; float: left; margin-right: 10px; border-radius: 2px;"></i> Sawah</div>
-    <div style="margin-bottom: 4px;"><i style="background:rgb(215,25,28); width: 16px; height: 16px; float: left; margin-right: 10px; border-radius: 2px;"></i> Bangunan</div>
+# 4. LEGENDA KEBUN ANTI DARK-MODE (Pakai !important agar tetap putih)
+legenda_html = f"""
+{{% macro html(this, kwargs) %}}
+<div style="position: absolute; bottom: 30px; left: 30px; width: 280px; 
+    background-color: white !important; color: #333 !important; z-index:9999; 
+    font-size:13px; font-family: Arial, sans-serif; border: 1px solid #ccc; 
+    border-radius: 8px; padding: 15px; box-shadow: 2px 2px 6px rgba(0,0,0,0.3);">
+    <h4 style="margin-top:0; margin-bottom:10px; font-size:15px; color: black !important;"><b>Legenda LULC Jawa Timur</b></h4>
+    
+    <i style="background:rgb(44,123,182); width: 15px; height: 15px; float: left; margin-right: 10px; border-radius: 2px;"></i> Air ({persentase_teks.get(1, '0%')})<br><br>
+    <i style="background:rgb(0,204,102); width: 15px; height: 15px; float: left; margin-right: 10px; border-radius: 2px;"></i> Hutan Mangrove ({persentase_teks.get(3, '0%')})<br><br>
+    <i style="background:rgb(0,128,0); width: 15px; height: 15px; float: left; margin-right: 10px; border-radius: 2px;"></i> Hutan Non-Mangrove ({persentase_teks.get(2, '0%')})<br><br>
+    <i style="background:rgb(215,25,28); width: 15px; height: 15px; float: left; margin-right: 10px; border-radius: 2px;"></i> Pemukiman ({persentase_teks.get(5, '0%')})<br><br>
+    <i style="background:rgb(255,255,0); width: 15px; height: 15px; float: left; margin-right: 10px; border-radius: 2px;"></i> Sawah ({persentase_teks.get(4, '0%')})<br>
+    
+    <hr style="margin: 10px 0; border-top: 1px solid #ddd;">
+    <span style="font-size: 11px; color: #666 !important;">Model: Random Forest | Resolusi: 100m</span>
 </div>
-{% endmacro %}
+{{% endmacro %}}
 """
 macro = MacroElement()
 macro._template = Template(legenda_html)
 m.get_root().add_child(macro)
 
-# Mengaktifkan panel kontrol visibilitas layer
+# 5. KUNCI LAYER CONTROL AGAR TERBUKA (collapsed=False)
 folium.LayerControl(collapsed=False).add_to(m)
 
-# Integrasi visualisasi peta ke panel utama Streamlit
+# Render
 st_folium(m, use_container_width=True, height=700)
