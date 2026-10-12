@@ -7,13 +7,54 @@ import numpy as np
 from branca.element import Template, MacroElement
 
 st.set_page_config(page_title="Dashboard LULC", layout="wide")
+
+# ==========================================
+# SIDEBAR CONTROLS (FITUR BARU)
+# ==========================================
+with st.sidebar:
+    st.header("⚙️ Kontrol Peta")
+    
+    # 1. Slider Transparansi
+    opacity_level = st.slider(
+        "Tingkat Transparansi Model (Opacity):", 
+        min_value=0.0, 
+        max_value=1.0, 
+        value=0.6, 
+        step=0.1,
+        help="Geser ke kiri untuk melihat satelit asli, geser ke kanan untuk melihat tebakan model."
+    )
+    
+    st.markdown("---")
+    
+    # 2. Filter Kelas (Multiselect OR)
+    st.subheader("Filter Kelas Tutupan Lahan")
+    daftar_kelas = {
+        'Perairan': 1,
+        'Hutan Biasa': 2,
+        'Hutan Mangrove': 3,
+        'Sawah': 4,
+        'Bangunan': 5
+    }
+    
+    # Secara default, semua kelas terpilih
+    kelas_terpilih = st.multiselect(
+        "Pilih kelas yang ingin ditampilkan:",
+        options=list(daftar_kelas.keys()),
+        default=list(daftar_kelas.keys())
+    )
+    
+    # Mengambil ID angka dari kelas yang dipilih
+    id_kelas_aktif = [daftar_kelas[k] for k in kelas_terpilih]
+
+
+# ==========================================
+# TAMPILAN UTAMA
+# ==========================================
 st.title("🗺️ Web GIS Klasifikasi Tutupan Lahan (LULC)")
 
 m = folium.Map(location=[-7.6, 112.5], zoom_start=8)
 
-# ==========================================
 # 1. LAYER BASEMAP
-# ==========================================
 folium.TileLayer(
     tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}',
     attr='Google',
@@ -30,38 +71,40 @@ folium.TileLayer(
     control=True
 ).add_to(m)
 
-# ==========================================
-# 2. LAYER TIF (TEBAKAN MODEL)
-# ==========================================
+# 2. LAYER TIF (TEBAKAN MODEL BERDASARKAN FILTER)
 try:
     with rasterio.open('Hasil_Klasifikasi_LULC.tif') as src:
         data = src.read(1)
         bounds = src.bounds
         
     rgba = np.zeros((data.shape[0], data.shape[1], 4), dtype=np.uint8)
-    rgba[data == 1] = [44, 123, 182, 255]   # Air
-    rgba[data == 2] = [0, 128, 0, 255]      # Hutan Biasa
-    rgba[data == 3] = [0, 204, 102, 255]    # Hutan Mangrove
-    rgba[data == 4] = [255, 255, 0, 255]    # Sawah
-    rgba[data == 5] = [215, 25, 28, 255]    # Bangunan
+    
+    # Logika Filter 'OR': Hanya warnai piksel jika kelasnya ada di dalam id_kelas_aktif
+    if 1 in id_kelas_aktif:
+        rgba[data == 1] = [44, 123, 182, 255]   # Air
+    if 2 in id_kelas_aktif:
+        rgba[data == 2] = [0, 128, 0, 255]      # Hutan Biasa
+    if 3 in id_kelas_aktif:
+        rgba[data == 3] = [0, 204, 102, 255]    # Hutan Mangrove
+    if 4 in id_kelas_aktif:
+        rgba[data == 4] = [255, 255, 0, 255]    # Sawah
+    if 5 in id_kelas_aktif:
+        rgba[data == 5] = [215, 25, 28, 255]    # Bangunan
     
     folium.raster_layers.ImageOverlay(
         image=rgba,
         bounds=[[bounds.bottom, bounds.left], [bounds.top, bounds.right]],
         name="Layer 2: Tebakan Model TIF",
-        opacity=0.5,
+        opacity=opacity_level, # Menggunakan nilai dari slider transparansi
         show=True
     ).add_to(m)
 except Exception as e:
     st.error(f"Gagal memuat raster: {e}")
 
-# ==========================================
 # 3. LAYER POLYGON (DATA ASLI)
-# ==========================================
 try:
     gdf = gpd.read_file("UTS_data.geojson") 
     
-    # Tooltip HANYA memuat kelas aslinya saja agar konsisten dan tidak menyesatkan
     tooltip_poligon = folium.GeoJsonTooltip(
         fields=['Class'], 
         aliases=['🎯 Data Asli (Polygon) : '],
@@ -99,8 +142,6 @@ macro = MacroElement()
 macro._template = Template(legenda_html)
 m.get_root().add_child(macro)
 
-# Mengaktifkan panel layer control di kanan atas
 folium.LayerControl(collapsed=False).add_to(m)
 
-# Render map di Streamlit
 st_folium(m, use_container_width=True, height=700)
