@@ -3,15 +3,15 @@ import folium
 from streamlit_folium import st_folium
 import geopandas as gpd
 import rasterio
+from rasterio.enums import Resampling
 import numpy as np
 from branca.element import Template, MacroElement
 
-st.set_page_config(page_title="Dashboard LULC", layout="wide")
+st.set_page_config(page_title="Dashboard LULC Jawa Timur", layout="wide")
 
 # ==========================================
-# KONFIGURASI KELAS (satu sumber untuk warna, filter, dan legenda)
+# KONFIGURASI KELAS & FILE
 # ==========================================
-# (id piksel, nama, warna RGB)
 KELAS = [
     (1, "Perairan",       (44, 123, 182)),
     (2, "Hutan Biasa",    (0, 128, 0)),
@@ -20,11 +20,12 @@ KELAS = [
     (5, "Bangunan",       (215, 25, 28)),
 ]
 
-FILE_TIF = "Hasil_Klasifikasi_LULC.tif"
-FILE_GEOJSON = "UTS_data.geojson"
+# Nama file disesuaikan dengan hasil kompresi LZW dan GeoJSON terbaru
+FILE_TIF = "Hasil_Klasifikasi_LULC_Kecil.tif"
+FILE_GEOJSON = "Update22.geojson"
 
 # ==========================================
-# TAMPILAN (CSS)
+# TAMPILAN (CSS) - Mencegah Efek Redup/Gelap Streamlit
 # ==========================================
 st.markdown(
     """
@@ -34,7 +35,17 @@ st.markdown(
     html, body, [class*="css"], .stMarkdown, label, button {
         font-family: 'Instrument Sans', sans-serif;
     }
-    .block-container { padding-top: 2rem; padding-bottom: 1rem; }
+    .block-container { padding-top: 1.8rem; padding-bottom: 1rem; }
+
+    /* Mencegah efek layar meredup/gelap (stale element dimming) saat ganti filter */
+    div[data-stale="true"] {
+        opacity: 1 !important;
+        transition: none !important;
+    }
+    iframe {
+        opacity: 1 !important;
+        filter: none !important;
+    }
 
     section[data-testid="stSidebar"] {
         background-color: #E9EEF0;
@@ -45,8 +56,6 @@ st.markdown(
         font-weight: 600;
         color: #1D2B33 !important;
     }
-    
-    /* Memaksa teks di sidebar menjadi gelap agar terlihat di background terang */
     section[data-testid="stSidebar"] p, 
     section[data-testid="stSidebar"] span, 
     section[data-testid="stSidebar"] label,
@@ -72,72 +81,134 @@ st.markdown(
 )
 
 # ==========================================
-# STATE
+# INISIALISASI STATE
 # ==========================================
-for _id, nama, _ in KELAS:
-    st.session_state.setdefault(f"kelas_{_id}", True)   # default: semua tampil
-st.session_state.setdefault("view", {"center": [-7.6, 112.5], "zoom": 8})
+for _id, _, _ in KELAS:
+    if f"cb_kelas_{_id}" not in st.session_state:
+        st.session_state[f"cb_kelas_{_id}"] = True
 
-
-def set_semua(nilai: bool):
+def pilih_semua_kelas():
     for _id, _, _ in KELAS:
-        st.session_state[f"kelas_{_id}"] = nilai
+        st.session_state[f"cb_kelas_{_id}"] = True
 
+def kosongkan_semua_kelas():
+    for _id, _, _ in KELAS:
+        st.session_state[f"cb_kelas_{_id}"] = False
 
 # ==========================================
-# SIDEBAR
+# SIDEBAR FILTER & KONTROL
 # ==========================================
 with st.sidebar:
-    st.subheader("Tampilan peta")
+    st.subheader("Mode Tampilan Peta")
+    
+    # Filter Cepat Sesuai Kebutuhan: Hanya Map, Hanya TIF, Gabungan, atau 1 Kelas Saja
+    pilihan_mode = [
+        "Gabungan (Peta + TIF)",
+        "Hanya Peta Dasar (Map Saja)",
+        "Hanya Hasil Klasifikasi (TIF Saja)",
+        "Fokus 1 Kelas Tertentu",
+    ]
+    mode_tampilan = st.radio(
+        "Pilih Mode Visualisasi:",
+        options=pilihan_mode,
+        index=0,
+    )
 
-    # Slider skala 0 - 100 persen
+    # Pilihan Basemap (Agar tetap terang terus)
+    pilihan_basemap = st.selectbox(
+        "Pilih Peta Dasar (Basemap):",
+        options=[
+            "Google Streets (Terang & Jelas)",
+            "CartoDB Positron (Putih Bersih)",
+            "Google Hybrid (Satelit + Nama Jalan)",
+            "Google Satellite (Satelit Polos)",
+        ],
+        index=0,
+    )
+
+    # Checkbox untuk menampilkan/menyembunyikan poligon sampel latihan
+    tampilkan_poligon = st.checkbox("Tampilkan Poligon Sampel Asli", value=False)
+
+    st.divider()
+    st.subheader("Pengaturan Transparansi")
+
     opacity_level = st.slider(
-        "Transparansi hasil klasifikasi",
+        "Transparansi Klasifikasi (TIF)",
         min_value=0,
         max_value=100,
-        value=60,
+        value=75,
         step=5,
         format="%d%%",
-        help="Geser ke kiri (0%) untuk melihat citra satelit murni, ke kanan (100%) untuk tebakan model pekat.",
+        disabled=(mode_tampilan == "Hanya Peta Dasar (Map Saja)"),
+        help="0% = Transparan penuh (tidak terlihat), 100% = Warna solid pekat.",
     )
 
     st.divider()
-    st.subheader("Kelas tutupan lahan")
+    st.subheader("Filter Kelas Tutupan Lahan")
 
-    kol_a, kol_b = st.columns(2)
-    kol_a.button("Pilih semua", on_click=set_semua, args=(True,), use_container_width=True)
-    kol_b.button("Kosongkan", on_click=set_semua, args=(False,), use_container_width=True)
+    id_kelas_aktif = []
 
-    # Checkbox per kelas -> logika OR (1, beberapa, atau semua kelas)
-    for id_kelas, nama, _ in KELAS:
-        st.checkbox(nama, key=f"kelas_{id_kelas}")
+    if mode_tampilan == "Hanya Peta Dasar (Map Saja)":
+        st.info("Mode 'Hanya Peta Dasar' aktif. Layer klasifikasi TIF disembunyikan.")
+        id_kelas_aktif = []
 
-id_kelas_aktif = [i for i, _, _ in KELAS if st.session_state[f"kelas_{i}"]]
+    elif mode_tampilan == "Fokus 1 Kelas Tertentu":
+        nama_ke_id = {nama: _id for _id, nama, _ in KELAS}
+        kelas_terpilih = st.selectbox(
+            "Pilih 1 Kelas untuk Ditampilkan:",
+            options=list(nama_ke_id.keys()),
+        )
+        id_kelas_aktif = [nama_ke_id[kelas_terpilih]]
+
+    else:
+        # Mode Gabungan atau Hanya TIF -> Bebas centang beberapa kelas
+        kol_a, kol_b = st.columns(2)
+        if kol_a.button("Pilih Semua", use_container_width=True):
+            pilih_semua_kelas()
+            st.rerun()
+        if kol_b.button("Kosongkan", use_container_width=True):
+            kosongkan_semua_kelas()
+            st.rerun()
+
+        for id_kelas, nama, _ in KELAS:
+            centang = st.checkbox(nama, key=f"cb_kelas_{id_kelas}")
+            if centang:
+                id_kelas_aktif.append(id_kelas)
 
 # ==========================================
-# DATA (di-cache supaya tidak dibaca ulang tiap interaksi)
+# FUNGSI PEMUATAN DATA (DENGAN OPTIMASI MEMORI)
 # ==========================================
-@st.cache_data(show_spinner="Membaca raster...")
-def muat_raster(path):
+@st.cache_data(show_spinner="Memuat citra klasifikasi Jawa Timur...")
+def muat_raster(path, max_dim=2400):
     with rasterio.open(path) as src:
-        data = src.read(1)
+        # Downsampling khusus untuk visualisasi web agar tidak berat/gelap di browser
+        skala = min(1.0, max_dim / max(src.height, src.width))
+        tinggi_baru = max(1, int(src.height * skala))
+        lebar_baru = max(1, int(src.width * skala))
+
+        data = src.read(
+            1,
+            out_shape=(tinggi_baru, lebar_baru),
+            resampling=Resampling.nearest, # Nearest menjaga nilai kelas 1-5 tetap utuh
+        )
         b = src.bounds
         crs = src.crs.to_string() if src.crs else None
     return data, (b.bottom, b.left, b.top, b.right), crs
 
 
-@st.cache_data(show_spinner="Membaca poligon...")
+@st.cache_data(show_spinner="Memuat poligon sampel...")
 def muat_poligon(path):
-    return gpd.read_file(path)
+    gdf = gpd.read_file(path)
+    if "Class" in gdf.columns:
+        # Bersihkan karakter \n dan buang poligon 'JAWA TIMUR' agar tidak menutupi/menggelapkan peta!
+        gdf["Class_Clean"] = gdf["Class"].astype(str).str.strip()
+        gdf = gdf[gdf["Class_Clean"] != "JAWA TIMUR"].copy()
+    return gdf
 
 
 def buat_rgba(data, aktif, opacity_persen):
-    """Warna kelas dan alpha digabung langsung di piksel,
-    jadi slider transparansi pasti terlihat pada warna kelas."""
-    # Konversi dari persentase (0-100) ke skala desimal (0-1) lalu ke alpha 8-bit (0-255)
     alpha = int(round((opacity_persen / 100.0) * 255))
-    
-    lut = np.zeros((256, 4), dtype=np.uint8)   # indeks 0 = transparan
+    lut = np.zeros((256, 4), dtype=np.uint8)
     for id_kelas, _, (r, g, b) in KELAS:
         if id_kelas in aktif:
             lut[id_kelas] = [r, g, b, alpha]
@@ -147,123 +218,127 @@ def buat_rgba(data, aktif, opacity_persen):
 
 
 # ==========================================
-# HALAMAN UTAMA
+# RENDER HALAMAN UTAMA & PETA
 # ==========================================
-st.markdown('<p class="judul-halaman">Klasifikasi Tutupan Lahan (LULC)</p>', unsafe_allow_html=True)
+st.markdown('<p class="judul-halaman">Dashboard Klasifikasi Tutupan Lahan (LULC) Jawa Timur</p>', unsafe_allow_html=True)
 st.markdown(
-    '<p class="sub-halaman">Hasil klasifikasi model dibandingkan dengan poligon data asli.</p>',
+    '<p class="sub-halaman">Visualisasi interaktif pemetaan tutupan lahan Provinsi Jawa Timur berbasis Sentinel-2 & Random Forest.</p>',
     unsafe_allow_html=True,
 )
 
-view = st.session_state["view"]
-m = folium.Map(location=view["center"], zoom_start=view["zoom"])
+# Buat objek peta dasar
+m = folium.Map(
+    location=[-7.75, 112.75],
+    zoom_start=8,
+    tiles=None, # Kita atur manual di bawah sesuai mode
+    control_scale=True,
+)
 
-# 1. LAYER BASEMAP
-folium.TileLayer(
-    tiles="https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}",
-    attr="Google",
-    name="Layer 1: Google Hybrid (Satelit & Label)",
-    overlay=False,
-    control=True,
-).add_to(m)
-
-folium.TileLayer(
-    tiles="https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
-    attr="Google",
-    name="Layer 1: Google Satellite (Polos)",
-    overlay=False,
-    control=True,
-).add_to(m)
+# 1. PENGATURAN BASEMAP (Tetap terang & bisa dimatikan jika mode 'Hanya TIF')
+if mode_tampilan == "Hanya Hasil Klasifikasi (TIF Saja)":
+    # Background putih bersih tanpa peta jalan/satelit
+    folium.TileLayer(
+        tiles="",
+        attr="Kanvas Kosong",
+        name="Kanvas Polos (Tanpa Peta)",
+        overlay=False,
+        control=False,
+    ).add_to(m)
+else:
+     kamus_tiles = {
+        "Google Streets (Terang & Jelas)": "https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}",
+        "CartoDB Positron (Putih Bersih)": "https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
+        "Google Hybrid (Satelit + Nama Jalan)": "https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}",
+        "Google Satellite (Satelit Polos)": "https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
+    }
+    folium.TileLayer(
+        tiles=kamus_tiles[pilihan_basemap],
+        attr="Basemap",
+        name=pilihan_basemap,
+        overlay=False,
+        control=False,
+    ).add_to(m)
 
 # 2. LAYER TIF (HASIL KLASIFIKASI MODEL)
-try:
-    data, (bawah, kiri, atas, kanan), crs = muat_raster(FILE_TIF)
+if mode_tampilan != "Hanya Peta Dasar (Map Saja)" and len(id_kelas_aktif) > 0 and opacity_level > 0:
+    try:
+        data, (bawah, kiri, atas, kanan), crs = muat_raster(FILE_TIF)
+        rgba = buat_rgba(data, id_kelas_aktif, opacity_level)
 
-    if crs and crs.upper() != "EPSG:4326":
-        st.warning(
-            f"Raster memakai {crs}, bukan EPSG:4326. Posisi overlay bisa meleset; "
-            "reproyeksi dulu ke EPSG:4326."
+        folium.raster_layers.ImageOverlay(
+            image=rgba,
+            bounds=[[bawah, kiri], [atas, kanan]],
+            name="Hasil Klasifikasi LULC",
+            opacity=1.0, # Sudah diatur lewat nilai alpha RGBA
+            interactive=False,
+            cross_origin=False,
+            zindex=2,
+        ).add_to(m)
+    except Exception as e:
+        st.error(f"Gagal memuat file raster '{FILE_TIF}': {e}")
+
+# 3. LAYER POLIGON SAMPEL (Tanpa Poligon 'JAWA TIMUR' yang bikin gelap)
+if tampilkan_poligon:
+    try:
+        gdf = muat_poligon(FILE_GEOJSON)
+        tooltip_poligon = folium.GeoJsonTooltip(
+            fields=["Class_Clean"],
+            aliases=["Kelas Sampel Asli: "],
+            style=(
+                "background-color: white; color: black; font-weight: bold; padding: 8px; "
+                "border: 1px solid #333; border-radius: 4px; font-size: 12px;"
+            ),
         )
-
-    rgba = buat_rgba(data, id_kelas_aktif, opacity_level)
-
-    folium.raster_layers.ImageOverlay(
-        image=rgba,
-        bounds=[[bawah, kiri], [atas, kanan]],
-        name="Layer 2: Hasil Klasifikasi Model",
-        opacity=1.0,   # transparansi sudah ada di kanal alpha piksel dari buat_rgba
-        show=True,
-    ).add_to(m)
-except Exception as e:
-    st.error(f"Gagal memuat raster: {e}")
-
-# 3. LAYER POLYGON (DATA ASLI)
-try:
-    gdf = muat_poligon(FILE_GEOJSON)
-
-    tooltip_poligon = folium.GeoJsonTooltip(
-        fields=["Class"],
-        aliases=["Data asli (poligon): "],
-        style=(
-            "background-color: white; color: black; font-weight: bold; padding: 10px; "
-            "border: 2px solid #333; border-radius: 5px; font-size: 13px;"
-        ),
-    )
-
-    folium.GeoJson(
-        gdf,
-        name="Layer 3: Poligon Data Asli",
-        style_function=lambda x: {"color": "#FFFF00", "weight": 2.5, "fillOpacity": 0.1},
-        tooltip=tooltip_poligon,
-    ).add_to(m)
-except Exception as e:
-    st.error(f"Gagal memproses poligon: {e}")
+        folium.GeoJson(
+            gdf,
+            name="Poligon Sampel Asli",
+            style_function=lambda x: {
+                "color": "#FF6600",
+                "weight": 2,
+                "fillColor": "#FFFF00",
+                "fillOpacity": 0.25,
+            },
+            tooltip=tooltip_poligon,
+        ).add_to(m)
+    except Exception as e:
+        st.error(f"Gagal memproses poligon '{FILE_GEOJSON}': {e}")
 
 # ==========================================
-# LEGENDA (hanya menampilkan kelas yang aktif)
+# LEGENDA DINAMIS
 # ==========================================
-baris = ""
+baris_legenda = ""
 for id_kelas, nama, (r, g, b) in KELAS:
     if id_kelas in id_kelas_aktif:
-        baris += (
+        baris_legenda += (
             '<div style="display:flex; align-items:center; margin-bottom:7px;">'
             f'<span style="background:rgb({r},{g},{b}); width:14px; height:14px; '
             'border-radius:2px; margin-right:10px; border:1px solid rgba(0,0,0,0.25);"></span>'
             f"{nama}</div>"
         )
-if not baris:
-    baris = '<div style="color:#666;">Tidak ada kelas dipilih</div>'
+if not baris_legenda:
+    baris_legenda = '<div style="color:#666;">Layer TIF disembunyikan</div>'
 
 legenda_html = (
     "{% macro html(this, kwargs) %}"
-    '<div style="position:absolute; bottom:30px; left:30px; min-width:180px; '
+    '<div style="position:fixed; bottom:35px; left:35px; min-width:185px; '
     "background-color:white !important; color:#1D2B33 !important; z-index:9999; "
     "font-size:13px; font-family:Arial, sans-serif; border:1px solid #B8C4C9; "
-    'border-radius:4px; padding:12px 14px; box-shadow:0 1px 4px rgba(0,0,0,0.25);">'
+    'border-radius:6px; padding:12px 14px; box-shadow:0 2px 6px rgba(0,0,0,0.2);">'
     '<div style="font-size:14px; font-weight:bold; margin-bottom:10px;">Legenda LULC</div>'
-    + baris
+    + baris_legenda
     + "</div>{% endmacro %}"
 )
 macro = MacroElement()
 macro._template = Template(legenda_html)
 m.get_root().add_child(macro)
 
-folium.LayerControl(collapsed=False).add_to(m)
-
 # ==========================================
-# RENDER PETA DENGAN KUNCI STATIS (Mencegah Tumpukan Redup)
+# TAMPILKAN PETA (Tanpa Rerun Loop)
 # ==========================================
-hasil = st_folium(
+st_folium(
     m,
     use_container_width=True,
-    height=700,
-    key="peta_utama_lulc", # Kunci dibuat statis agar tidak dirender ulang secara bertumpuk
-    returned_objects=["center", "zoom"],
+    height=680,
+    key="peta_lulc_jatim",
+    returned_objects=[], # Kosongkan agar peta tidak me-reload ulang aplikasi saat digeser
 )
-
-# Simpan posisi & zoom terakhir agar peta tidak lompat saat filter diubah
-if hasil and hasil.get("center") and hasil.get("zoom"):
-    st.session_state["view"] = {
-        "center": [hasil["center"]["lat"], hasil["center"]["lng"]],
-        "zoom": hasil["zoom"],
-    }
