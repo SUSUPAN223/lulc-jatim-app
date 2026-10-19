@@ -20,12 +20,11 @@ KELAS = [
     (5, "Bangunan",       (215, 25, 28)),
 ]
 
-# Nama file disesuaikan dengan hasil kompresi LZW dan GeoJSON terbaru
 FILE_TIF = "Hasil_Klasifikasi_LULC_Kecil.tif"
 FILE_GEOJSON = "Update22.geojson"
 
 # ==========================================
-# TAMPILAN (CSS) - Mencegah Efek Redup/Gelap Streamlit
+# TAMPILAN (CSS)
 # ==========================================
 st.markdown(
     """
@@ -37,7 +36,6 @@ st.markdown(
     }
     .block-container { padding-top: 1.8rem; padding-bottom: 1rem; }
 
-    /* Mencegah efek layar meredup/gelap (stale element dimming) saat ganti filter */
     div[data-stale="true"] {
         opacity: 1 !important;
         transition: none !important;
@@ -87,21 +85,23 @@ for _id, _, _ in KELAS:
     if f"cb_kelas_{_id}" not in st.session_state:
         st.session_state[f"cb_kelas_{_id}"] = True
 
+
 def pilih_semua_kelas():
     for _id, _, _ in KELAS:
         st.session_state[f"cb_kelas_{_id}"] = True
 
+
 def kosongkan_semua_kelas():
     for _id, _, _ in KELAS:
         st.session_state[f"cb_kelas_{_id}"] = False
+
 
 # ==========================================
 # SIDEBAR FILTER & KONTROL
 # ==========================================
 with st.sidebar:
     st.subheader("Mode Tampilan Peta")
-    
-    # Filter Cepat Sesuai Kebutuhan: Hanya Map, Hanya TIF, Gabungan, atau 1 Kelas Saja
+
     pilihan_mode = [
         "Gabungan (Peta + TIF)",
         "Hanya Peta Dasar (Map Saja)",
@@ -114,7 +114,6 @@ with st.sidebar:
         index=0,
     )
 
-    # Pilihan Basemap (Agar tetap terang terus)
     pilihan_basemap = st.selectbox(
         "Pilih Peta Dasar (Basemap):",
         options=[
@@ -126,7 +125,6 @@ with st.sidebar:
         index=0,
     )
 
-    # Checkbox untuk menampilkan/menyembunyikan poligon sampel latihan
     tampilkan_poligon = st.checkbox("Tampilkan Poligon Sampel Asli", value=False)
 
     st.divider()
@@ -161,7 +159,6 @@ with st.sidebar:
         id_kelas_aktif = [nama_ke_id[kelas_terpilih]]
 
     else:
-        # Mode Gabungan atau Hanya TIF -> Bebas centang beberapa kelas
         kol_a, kol_b = st.columns(2)
         if kol_a.button("Pilih Semua", use_container_width=True):
             pilih_semua_kelas()
@@ -175,13 +172,13 @@ with st.sidebar:
             if centang:
                 id_kelas_aktif.append(id_kelas)
 
+
 # ==========================================
-# FUNGSI PEMUATAN DATA (DENGAN OPTIMASI MEMORI)
+# FUNGSI PEMUATAN DATA (OPTIMASI MEMORI)
 # ==========================================
 @st.cache_data(show_spinner="Memuat citra klasifikasi Jawa Timur...")
 def muat_raster(path, max_dim=2400):
     with rasterio.open(path) as src:
-        # Downsampling khusus untuk visualisasi web agar tidak berat/gelap di browser
         skala = min(1.0, max_dim / max(src.height, src.width))
         tinggi_baru = max(1, int(src.height * skala))
         lebar_baru = max(1, int(src.width * skala))
@@ -189,7 +186,7 @@ def muat_raster(path, max_dim=2400):
         data = src.read(
             1,
             out_shape=(tinggi_baru, lebar_baru),
-            resampling=Resampling.nearest, # Nearest menjaga nilai kelas 1-5 tetap utuh
+            resampling=Resampling.nearest,
         )
         b = src.bounds
         crs = src.crs.to_string() if src.crs else None
@@ -200,7 +197,6 @@ def muat_raster(path, max_dim=2400):
 def muat_poligon(path):
     gdf = gpd.read_file(path)
     if "Class" in gdf.columns:
-        # Bersihkan karakter \n dan buang poligon 'JAWA TIMUR' agar tidak menutupi/menggelapkan peta!
         gdf["Class_Clean"] = gdf["Class"].astype(str).str.strip()
         gdf = gdf[gdf["Class_Clean"] != "JAWA TIMUR"].copy()
     return gdf
@@ -226,17 +222,14 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Buat objek peta dasar
 m = folium.Map(
     location=[-7.75, 112.75],
     zoom_start=8,
-    tiles=None, # Kita atur manual di bawah sesuai mode
+    tiles=None,
     control_scale=True,
 )
 
-# 1. PENGATURAN BASEMAP (Tetap terang & bisa dimatikan jika mode 'Hanya TIF')
 if mode_tampilan == "Hanya Hasil Klasifikasi (TIF Saja)":
-    # Background putih bersih tanpa peta jalan/satelit
     folium.TileLayer(
         tiles="",
         attr="Kanvas Kosong",
@@ -245,7 +238,7 @@ if mode_tampilan == "Hanya Hasil Klasifikasi (TIF Saja)":
         control=False,
     ).add_to(m)
 else:
-     kamus_tiles = {
+    kamus_tiles = {
         "Google Streets (Terang & Jelas)": "https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}",
         "CartoDB Positron (Putih Bersih)": "https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
         "Google Hybrid (Satelit + Nama Jalan)": "https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}",
@@ -259,7 +252,6 @@ else:
         control=False,
     ).add_to(m)
 
-# 2. LAYER TIF (HASIL KLASIFIKASI MODEL)
 if mode_tampilan != "Hanya Peta Dasar (Map Saja)" and len(id_kelas_aktif) > 0 and opacity_level > 0:
     try:
         data, (bawah, kiri, atas, kanan), crs = muat_raster(FILE_TIF)
@@ -269,7 +261,7 @@ if mode_tampilan != "Hanya Peta Dasar (Map Saja)" and len(id_kelas_aktif) > 0 an
             image=rgba,
             bounds=[[bawah, kiri], [atas, kanan]],
             name="Hasil Klasifikasi LULC",
-            opacity=1.0, # Sudah diatur lewat nilai alpha RGBA
+            opacity=1.0,
             interactive=False,
             cross_origin=False,
             zindex=2,
@@ -277,7 +269,6 @@ if mode_tampilan != "Hanya Peta Dasar (Map Saja)" and len(id_kelas_aktif) > 0 an
     except Exception as e:
         st.error(f"Gagal memuat file raster '{FILE_TIF}': {e}")
 
-# 3. LAYER POLIGON SAMPEL (Tanpa Poligon 'JAWA TIMUR' yang bikin gelap)
 if tampilkan_poligon:
     try:
         gdf = muat_poligon(FILE_GEOJSON)
@@ -332,13 +323,10 @@ macro = MacroElement()
 macro._template = Template(legenda_html)
 m.get_root().add_child(macro)
 
-# ==========================================
-# TAMPILKAN PETA (Tanpa Rerun Loop)
-# ==========================================
 st_folium(
     m,
     use_container_width=True,
     height=680,
     key="peta_lulc_jatim",
-    returned_objects=[], # Kosongkan agar peta tidak me-reload ulang aplikasi saat digeser
+    returned_objects=[],
 )
